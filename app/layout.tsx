@@ -5,6 +5,7 @@ import "./globals.css";
 const IBMsans = IBM_Plex_Sans({
   variable: "--font-ibm-sans",
   subsets: ["latin"],
+  weight: ["300", "400", "500", "600", "700"],
 });
 
 const IBMmono = IBM_Plex_Mono({
@@ -14,8 +15,8 @@ const IBMmono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "TexVision OCR Portal",
-  description: "Serverless OCR portal built with Next.js and Tesseract.js",
+  title: "TexVision Telugu OCR",
+  description: "Telugu OCR solutions NLP",
 };
 
 export default function RootLayout({
