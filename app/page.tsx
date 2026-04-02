@@ -1,6 +1,7 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
 import Tesseract from "tesseract.js";
+import Link from "next/link";
 import jsPDF from "jspdf";
 import { Document, Packer, Paragraph, TextRun } from "docx";
 import { saveAs } from "file-saver";
@@ -220,8 +221,15 @@ export default function Home() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black font-ibm-sans">
       <main className="flex min-h-screen w-full max-w-5xl flex-col items-center justify-between pt-8 md:pt-16 md:px-16 px-4 bg-white dark:bg-black sm:items-start">
+        <div className="flex  items-center justify-between w-full mb-8">
         <div className="uppercase text-2xl font-ibm-sans font-bold tracking-wide text-foreground dark:text-white mb-8">
           <span className="-tracking-widest">tex</span>vision
+        </div>
+        <Link href="/tokenizer">
+          <div className="uppercase text-2xl font-ibm-sans font-bold tracking-wide text-foreground dark:text-white mb-8">
+            <span className="-tracking-widest">tex</span>tokenizer
+          </div>
+        </Link>
         </div>
 
         <div className="grid-cols-1 md:grid-cols-2 grid gap-4 md:gap-32 w-full">
