@@ -15,8 +15,9 @@ const IBMmono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "TexVision Telugu OCR",
-  description: "Telugu OCR solutions NLP",
+  title: "TelVision",
+  description: "Telugu NLP",
+  keywords: ["Telugu", "NLP", "Tokenizer", "Language Model", "AI", "Spell Checker", "Telugu OCR", "Telugu Text Analysis"],
 };
 
 export default function RootLayout({
