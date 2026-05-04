@@ -23,7 +23,6 @@ const TELUGU_CHARS = {
     ]
 };
 
-// Soft, glassy highlights for the tokens matching your theme
 const HIGHLIGHT_COLORS = [
     "bg-primary/15 text-primary",
     "bg-blue-500/15 text-blue-500",
@@ -33,7 +32,7 @@ const HIGHLIGHT_COLORS = [
     "bg-pink-500/15 text-pink-500"
 ];
 
-const BACKEND = "http://127.0.0.1:8000";
+const BACKEND = "https://suryaat19-texvision-api.hf.space";
 
 export default function Tokenizer() {
     const [text, setText] = useState("");
@@ -43,7 +42,6 @@ export default function Tokenizer() {
     const [tokenizedChunks, setTokenizedChunks] = useState<string[]>([]);
     const [isTokenizing, setIsTokenizing] = useState(false);
 
-    // Debounced Tokenization Effect
     useEffect(() => {
         const fetchTokens = async () => {
             if (!text.trim()) {
@@ -74,7 +72,7 @@ export default function Tokenizer() {
 
         const timeoutId = setTimeout(() => {
             fetchTokens();
-        }, 400); // 400ms debounce to prevent spamming the backend
+        }, 400);
 
         return () => clearTimeout(timeoutId);
     }, [text]);
