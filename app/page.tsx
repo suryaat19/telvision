@@ -36,7 +36,7 @@ interface SpellCheckResult {
   segmentation: string;
 }
 
-const BACKEND = "https://suryaat19-texvision-api.hf.space";
+const BACKEND = "https://suryaat19-telvision-api.hf.space";
 
 function countTeluguSentences(text: string): number {
   if (!text || !text.trim()) return 0;
