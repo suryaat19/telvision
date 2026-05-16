@@ -32,7 +32,7 @@ const HIGHLIGHT_COLORS = [
     "bg-pink-500/15 text-pink-500"
 ];
 
-const BACKEND = "https://suryaat19-texvision-api.hf.space";
+const BACKEND = "https://suryaat19-telvision-api.hf.space";
 
 export default function Tokenizer() {
     const [text, setText] = useState("");
