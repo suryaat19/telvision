@@ -1,256 +1,215 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import re
-from collections import Counter, defaultdict
-import time
-import sys
+import json
+import os
+import io
+from PIL import Image
+import pytesseract
+from indic_transliteration import sanscript
+from indic_transliteration.sanscript import transliterate
+from spellchecker import process_spellcheck
+from transformers import PreTrainedTokenizerFast
 
 app = FastAPI()
+
+@app.get("/")
+async def health_check():
+    return {"status": "ok", "message": "Telvision Backend is running perfectly!"}
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-trained_bpe_models = {}
-VOCAB_SIZES = [8000, 16000, 32000, 64000, 128000, 256000]
+print("Loading Hugging Face Telugu Tokenizer...")
+try:
+    hf_tokenizer = PreTrainedTokenizerFast(
+        tokenizer_file="telugu_wordpiece.json",
+        unk_token="[UNK]",
+        pad_token="[PAD]",
+        cls_token="[CLS]",
+        sep_token="[SEP]",
+        mask_token="[MASK]"
+    )
+except Exception as e:
+    print(f"Warning: Could not load tokenizer. Make sure 'telugu_wordpiece.json' is in the folder. Error: {e}")
 
-
-class UploadCorpusRequest(BaseModel):
+class TransliterationRequest(BaseModel):
+    """Request model for transliteration."""
     text: str
-
 
 class TokenizeRequest(BaseModel):
+    """Request model for tokenization."""
     text: str
-    vocab_size: int
 
-def process_bash_style(text: str) -> Counter:
-    cleaned_text = re.sub(r'[^a-z\s]', '', text.lower())
-    words = cleaned_text.split()
-    return Counter(words)
+class OCRResponse(BaseModel):
+    """Response model for OCR processing and statistics."""
+    text: str
+    cleaned_text: str
+    char_count: int
+    word_count: int
+    avg_word_length: float
+    sentence_count: int
 
-def get_stats(vocab):
-    pairs = defaultdict(int)
-    for word, freq in vocab.items():
-        symbols = word.split()
-        for i in range(len(symbols) - 1):
-            pairs[(symbols[i], symbols[i + 1])] += freq
-    return pairs
+def load_bpe_vocab(filepath: str = "teluguBPE.json") -> dict:
+    """Loads the pre-trained BPE vocabulary from a JSON file."""
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Vocabulary file {filepath} not found.")
+    with open(filepath, "r", encoding="utf-8") as f:
+        return json.load(f)
 
+def get_text_area(text: str) -> str:
+    """Cleans and standardizes text spacing and line breaks."""
+    if not text:
+        return ""
+    text = re.sub(r'[\r\n]+', ' ', text)
+    return re.sub(r'\s+', ' ', text).strip()
 
-def merge_vocab(pair, v_in):
-    v_out = {}
-    bigram = re.escape(' '.join(pair))
-    pattern = re.compile(r'(?<!\S)' + bigram + r'(?!\S)')
+def get_character_count(text: str) -> int:
+    """Calculates total character count."""
+    return len(text)
 
-    for word, freq in v_in.items():
-        w_out = pattern.sub(''.join(pair), word)
-        v_out[w_out] = v_out.get(w_out, 0) + freq  # FIXED
+def get_word_count(text: str) -> int:
+    """Calculates total word count."""
+    if not text:
+        return 0
+    words = re.findall(r'[^\W\d_]+|\d+', text)
+    return len(words)
 
-    return v_out
+def get_average_word_length(text: str) -> float:
+    """Calculates average word length in the provided text."""
+    if not text:
+        return 0.0
+    words = re.findall(r'[^\W\d_]+|\d+', text)
+    if not words:
+        return 0.0
+    total_length = sum(len(word) for word in words)
+    return total_length / len(words)
 
+import re
 
-def apply_bpe_to_word(word, merges):
-    word_chars = " ".join(list(word))
+import re
 
-    for pair in merges:
-        bigram = re.escape(' '.join(pair))
-        pattern = re.compile(r'(?<!\S)' + bigram + r'(?!\S)')
-        word_chars = pattern.sub(''.join(pair), word_chars)
+class TeluguFSTSBD:
+    def __init__(self):
+        self.single_letter = r'(?:[a-zA-Z]|[\u0C05-\u0C39][\u0C3E-\u0C4D]?)'
+        
+        self.abbreviations = [
+            "డా", "ప్రొ", "శ్రీ", "మి", "కుమారి", 
+            "కి", "మీ", "సెం", "గ్రా", "కిలో", 
+            "ఉ", "సా", "రూ"
+        ]
+        self._compile_fst_rules()
 
-    return word_chars.split()
+    def _compile_fst_rules(self):
+        self.rule_decimals = re.compile(r'(\d)\.(\d)')
+        
+        abbr_pattern = r'(^|\s)(' + '|'.join(self.abbreviations) + r')\.'
+        self.rule_abbr = re.compile(abbr_pattern)        
+        
+        self.rule_initials = re.compile(r'(^|\s|<DOT>)(' + self.single_letter + r')\.')
+        
+        self.rule_quotes = re.compile(r'\.([\'\"])')
+        self.rule_boundaries = re.compile(r'([.?!|])(?:\s+|$)')
 
-def compute_vocab_from_merges(merges):
-    vocab = set()
-    for a, b in merges:
-        vocab.add(a)
-        vocab.add(b)
-        vocab.add(a + b)
-    return vocab
-
-
-def evaluate_bpe(word_counts, merges, vocab):
-    total_words = sum(word_counts.values())
-
-    total_tokens = sum(len(w.split()) * freq for w, freq in vocab.items())
-    avg_tokens_per_word = total_tokens / total_words
-
-    original_chars = sum(len(w) * freq for w, freq in word_counts.items())
-    compression_ratio = max(0, (1 - (total_tokens / original_chars)) * 100)
-
-    token_vocab = compute_vocab_from_merges(merges)
-
-    start = time.time()
-    tokenized = []
-    for word in word_counts.keys():
-        sub = apply_bpe_to_word(word + "</w>", merges)
-        tokenized.extend(sub)
-    tok_time = round(time.time() - start, 4)
-
-    oov_tokens = [t for t in tokenized if t not in token_vocab]
-    oov_rate = (len(oov_tokens) / len(tokenized)) * 100 if tokenized else 0
-
-    memory_kb = (sys.getsizeof(merges) + sys.getsizeof(token_vocab)) / 1024
-
-    return {
-        "avgTokensPerWord": round(avg_tokens_per_word, 3),
-        "compression(%)": round(compression_ratio, 2),
-        "oovRate(%)": round(oov_rate, 2),
-        "tokenizationTime(s)": tok_time,
-        "memory(KB)": round(memory_kb, 2),
-        "uniqueSubwords": len(token_vocab)
-    }
-
-
-def get_top_merges(pairs, top_n=10):
-    sorted_pairs = sorted(pairs.items(), key=lambda x: x[1], reverse=True)
-    return [
-        {"pair": f"{a}+{b}", "count": freq}
-        for (a, b), freq in sorted_pairs[:top_n]
-    ]
-
-@app.post("/api/train")
-async def train_bpe_models(data: UploadCorpusRequest):
-    start_time = time.time()
-
-    word_counts = process_bash_style(data.text)
-    total_words = sum(word_counts.values())
-
-    if total_words == 0:
-        raise HTTPException(status_code=400, detail="Corpus is empty after cleaning.")
-
-    initial_vocab_size = len(word_counts)
-
-    vocab = {' '.join(list(word)) + ' </w>': freq for word, freq in word_counts.items()}
-
-    base_chars = set()
-    for word in vocab.keys():
-        base_chars.update(word.split())
-
-    current_vocab_size = len(base_chars)
-    merges_learned = []
-    stats_output = []
-
-    global trained_bpe_models
-    trained_bpe_models.clear()
-
-    target_sizes = sorted(VOCAB_SIZES)
-    max_target = target_sizes[-1]
-
-    graph_data = {
-        "vocab_vs_compression": [],
-        "vocab_vs_tokens": []
-    }
-
-    while current_vocab_size < max_target:
-        pairs = get_stats(vocab)
-        if not pairs:
-            break
-
-        best_pair = max(pairs, key=pairs.get)
-        best_freq = pairs[best_pair]
-        if best_freq < 2:
-            print("Stopping early: no more frequent pairs")
-            break
-
-        print(f"[MERGE {len(merges_learned)+1}] {best_pair} -> {''.join(best_pair)} | freq={best_freq} | vocab_size={current_vocab_size}")
-
-        vocab = merge_vocab(best_pair, vocab)
-        merges_learned.append(best_pair)
-        current_vocab_size += 1
-
-        if current_vocab_size in target_sizes:
-            metrics = evaluate_bpe(word_counts, merges_learned, vocab)
-
-            trained_bpe_models[current_vocab_size] = list(merges_learned)
-
-            graph_data["vocab_vs_compression"].append({
-                "vocabSize": current_vocab_size,
-                "compression": metrics["compression(%)"]
-            })
-
-            graph_data["vocab_vs_tokens"].append({
-                "vocabSize": current_vocab_size,
-                "avgTokensPerWord": metrics["avgTokensPerWord"]
-            })
-
-            pairs = get_stats(vocab)
-            top_merges = get_top_merges(pairs)
-
-            stats_output.append({
-                "vocabSize": current_vocab_size,
-                **metrics,
-                "topMerges": top_merges
-            })
-
-    final_metrics = evaluate_bpe(word_counts, merges_learned, vocab)
-    pairs = get_stats(vocab)
-    top_merges = get_top_merges(pairs)
-
-    for size in target_sizes:
-        if size not in trained_bpe_models:
-            trained_bpe_models[size] = list(merges_learned)
-
-            stats_output.append({
-                "vocabSize": size,
-                **final_metrics,
-                "topMerges": top_merges,
-                "note": "Maxed out (corpus too small)"
-            })
+    def apply_fst_cascade(self, text):
+        """Applies the FST state transitions via regex cascading."""
+        if not text:
+            return ""
+        
+        text = self.rule_decimals.sub(r'\1<DOT>\2', text)
+        text = self.rule_abbr.sub(r'\1\2<DOT>', text)
+        
+        prev_text = ""
+        while text != prev_text:
+            prev_text = text
+            text = self.rule_initials.sub(r'\1\2<DOT>', text)
             
-            graph_data["vocab_vs_compression"].append({
-                "vocabSize": size,
-                "compression": final_metrics["compression(%)"]
-            })
+        text = self.rule_quotes.sub(r'<DOT>\1', text)
+        text = self.rule_boundaries.sub(r'\1\n', text)
+        text = text.replace('<DOT>', '.')
+        return text
 
-            graph_data["vocab_vs_tokens"].append({
-                "vocabSize": size,
-                "avgTokensPerWord": final_metrics["avgTokensPerWord"]
-            })
+    def segment_corpus(self, corpus_text):
+        """Processes the corpus and returns a list of sentences and the total count."""
+        if not corpus_text or not corpus_text.strip():
+            return [], 0
+        processed_text = self.apply_fst_cascade(corpus_text)
+        sentences = [s.strip() for s in processed_text.split('\n') if s.strip()]
+        return sentences, len(sentences)
 
-    elapsed_time = round(time.time() - start_time, 2)
+telugu_sbd = TeluguFSTSBD()
 
+def get_sentence_count(text: str) -> int:
+    """Calculates sentence count strictly based on Telugu language FST rules."""
+    _, count = telugu_sbd.segment_corpus(text)
+    return count
+
+async def run_tesseract_ocr(image_bytes: bytes) -> str:
+    """Executes Tesseract OCR extraction specifically for Telugu."""
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        extracted_text = pytesseract.image_to_string(image, lang='tel')
+        return extracted_text
+    except Exception as e:
+        raise Exception(f"Tesseract engine failed to process image: {str(e)}")
+
+@app.post("/api/transliterate")
+async def convert_text(request: TransliterationRequest):
+    """Converts Romanized Telugu or code-mixed text to Telugu script."""
+    transliterated = transliterate(request.text, sanscript.ITRANS, sanscript.TELUGU)
     return {
-        "message": "BPE Models trained successfully",
-        "time_taken_seconds": elapsed_time,
-        "initial_vocab_size": initial_vocab_size,
-        "stats": stats_output,
-        "graphs": graph_data
+        "original_text": request.text, 
+        "transliterated_text": transliterated
     }
 
 @app.post("/api/tokenize")
 async def tokenize_text(data: TokenizeRequest):
-    if data.vocab_size not in trained_bpe_models:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Model for vocab size {data.vocab_size} not trained yet."
+    """Tokenizes input text utilizing the custom trained Telugu WordPiece tokenizer."""
+    try:
+        tokens = hf_tokenizer.tokenize(data.text)
+        token_ids = hf_tokenizer.encode(data.text)
+        
+        return {
+            "text": data.text,
+            "tokens": tokens,
+            "token_ids": token_ids
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/ocr", response_model=OCRResponse)
+async def process_ocr(file: UploadFile = File(...)):
+    """Processes an uploaded image for Telugu OCR and returns text statistics."""
+    try:
+        image_bytes = await file.read()
+        extracted_text = await run_tesseract_ocr(image_bytes)
+        cleaned_text = get_text_area(extracted_text)
+        return OCRResponse(
+            text=extracted_text,
+            cleaned_text=cleaned_text,
+            char_count=get_character_count(extracted_text),
+            word_count=get_word_count(extracted_text),
+            avg_word_length=get_average_word_length(extracted_text),
+            sentence_count=get_sentence_count(extracted_text)
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OCR Processing failed: {str(e)}")
+    
+class SpellCheckRequest(BaseModel):
+    """Request model for spellchecking."""
+    text: str
 
-    merges_to_apply = trained_bpe_models[data.vocab_size]
-
-    words = re.split(r'(\s+)', data.text)
-    tokens = []
-
-    for word in words:
-        if word.isspace() or len(word.strip()) == 0:
-            tokens.append(word)
-            continue
-
-        cleaned_word = re.sub(r'[^a-zA-Z]', '', word).lower()
-        if not cleaned_word:
-            tokens.append(word)
-            continue
-
-        word_with_end = cleaned_word + "</w>"
-        subwords = apply_bpe_to_word(word_with_end, merges_to_apply)
-
-        subwords = [sw.replace("</w>", "") for sw in subwords]
-        tokens.extend(subwords)
-
-    return {
-        "vocab_size": data.vocab_size,
-        "tokens": [t for t in tokens if t]
-    }
+@app.post("/api/spellcheck")
+async def spellcheck_text(request: SpellCheckRequest):
+    """Executes Bi-Directional Trie morphological spellchecking."""
+    try:
+        results = process_spellcheck(request.text)
+        return {"results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
